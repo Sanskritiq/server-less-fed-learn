@@ -243,7 +243,7 @@ class LoopImprovement:
 
             # self.selected_clients = self.client_sample_stream[E]
             begin = time.time()
-            self.run_main(E)
+            self.run_main()
             end = time.time()
             avg_round_time = (avg_round_time * (self.current_epoch) + (end - begin)) / (
                 self.current_epoch + 1
@@ -252,19 +252,29 @@ class LoopImprovement:
         self.logger.log(
             f"loop's average time taken by each global epoch: {int(avg_round_time // 60)} m {(avg_round_time % 60):.2f} s."
         )
+        
+        save_client_stats()
     
               
-    def run_main(self, round):
-        self.logger.log(f"Round {round} starts.")
+    def run_main(self):
+        self.logger.log(f"Round {self.current_epoch} starts.")
         for i, client in enumerate(self.clients):
             self.logger.log(f"Client {client.client_id} starts.")
-            client.train(self.args.local_epoch)
+            delta, weight, self.client_stats[client.client_id][self.current_epoch] = client.train(self.args.local_epoch)
             if i < len(self.clients) - 1:
                 transfer_weights_without_last_module(client.model, self.clients[i+1].model)
-            elif i == len(self.clients) - 1 and round < self.args.global_epoch - 1:
+            elif i == len(self.clients) - 1 and self.current_epoch < self.args.global_epoch - 1:
                 transfer_weights_without_last_module(client.model, self.clients[0].model)
             self.logger.log(f"Client {client.client_id} ends.")
-        self.logger.log(f"Round {round} ends.")
+        self.logger.log(f"Round {self.current_epoch} ends.")
+        
+    def save_client_stats(self):
+        """This function is for saving each client's training info."""
+        with open(
+            OUT_DIR / self.output_dir / f"{self.args.dataset}_client_stats.pkl",
+            "wb",
+        ) as f:
+            pickle.dump(self.client_stats, f)
         
     def test(self):
         """The function for testing LI method's output (a single global model or personalized client models)."""
@@ -361,7 +371,54 @@ class LoopImprovement:
             self.eval_results[self.current_epoch + 1] = results
 
         self.test_flag = False
+    
+    def generate_client_params(self, client_id: int) -> OrderedDict[str, torch.Tensor]:
+        """
+        This function is for outputting model parameters that asked by `client_id`.
+
+        Args:
+            client_id (int): The ID of query client.
+
+        Returns:
+            OrderedDict[str, torch.Tensor]: The trainable model parameters.
+        """
+        if self.unique_model:
+            return OrderedDict(
+                zip(self.trainable_params_name, self.client_trainable_params[client_id])
+            )
+        else:
+            return self.global_params_dict
 
     def run(self):
-        pass
+        begin = time.time()
+        
+        if self.args.visible:
+            self.viz.close(win=self.viz_win_name)
+            
+        self.train()
+        end = time.time()
+        total = end - begin
+        self.logger.log(
+            f"{self.algo}'s total running time: {int(total // 3600)} h {int((total % 3600) // 60)} m {int(total % 60)} s."
+        )
+        self.logger.log("=" * 20, self.algo, "Experiment Results:", "=" * 20)
+        self.logger.log(
+            "Format: [green](before local fine-tuning) -> [blue](after local fine-tuning)"
+        )
+        self.logger.log(
+            {
+                epoch: {
+                    group: {
+                        split: {
+                            "loss": f"{metrics['before'][split]['loss']:.4f} -> {metrics['after'][split]['loss']:.4f}",
+                            "accuracy": f"{metrics['before'][split]['accuracy']:.2f}% -> {metrics['after'][split]['accuracy']:.2f}%",
+                        }
+                        for split in ["train", "val", "test"]
+                    }
+                    for group, metrics in results.items()
+                }
+                for epoch, results in self.eval_results.items()
+            }
+        )
+        
 
